@@ -1,0 +1,8 @@
+const TICKET_NUMBER_PREFIX = "MYV";
+
+const TICKET_NUMBER_LENGTH = 8;
+
+module.exports = {
+  TICKET_NUMBER_PREFIX,
+  TICKET_NUMBER_LENGTH,
+};

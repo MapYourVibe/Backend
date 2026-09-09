@@ -1,0 +1,891 @@
+// =====================================================================
+// Event Ticketing Platform — Prisma Schema
+// Conventions:
+//   - Models: PascalCase singular. Fields: camelCase (mapped to snake_case columns).
+//   - IDs: cuid(). Money: Int, stored in paise (₹1 = 100).
+//   - Every model has createdAt/updatedAt. Status fields use enums, not strings.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled connection (port 6543, pgbouncer=true) — used by the running app
+  directUrl = env("DIRECT_URL") // direct connection (port 5432) — used only by `prisma migrate`
+}
+
+// ---------------------------------------------------------------------
+// AUTH & USERS
+// ---------------------------------------------------------------------
+
+enum UserRole {
+  USER
+  ORGANIZER
+  ADMIN
+  OPS
+  VENUE_OWNER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  phone        String?  @unique
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(USER)
+  isFrozen     Boolean @default(false) @map("is_frozen")
+
+  // Email verification + OTP (used for both verify-email and password reset)
+  emailVerified        Boolean    @default(false) @map("email_verified")
+  emailOtpHash         String?    @map("email_otp_hash") // hashed, never stored in plaintext
+  emailOtpExpiresAt    DateTime?  @map("email_otp_expires_at") // verification OTP
+  resetOtpHash         String?    @map("reset_otp_hash")
+  resetOtpExpiresAt    DateTime?  @map("reset_otp_expires_at") // password reset OTP
+  otpAttempts          Int        @default(0) @map("otp_attempts") // brute-force guard, reset on success
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organizerProfile OrganizerProfile?
+  venueOwnerProfile VenueOwnerProfile?
+  orders           Order[]
+  reviews          Review[]
+  wishlist         Wishlist[]
+  follows          Follow[]
+  notifications    Notification[]
+  reservations     OrderReservation[]
+  checkIns         CheckIn[]          @relation("ScannedBy")
+  cafeBookings     CafeBooking[]
+
+  refundsInitiated Refund[] @relation("RefundInitiatedBy")
+  auditLogs        AuditLog[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------
+// ORGANIZER (admin-provisioned only — see PRD Addendum Section 5)
+// ---------------------------------------------------------------------
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model OrganizerProfile {
+  id             String         @id @default(cuid())
+  userId         String         @unique @map("user_id")
+  businessName   String         @map("business_name")
+  gstin          String?
+  gstRegistered  Boolean        @default(false) @map("gst_registered")
+  approvalStatus ApprovalStatus @default(PENDING) @map("approval_status")
+  onboardedBy    String?        @map("onboarded_by") // admin user id
+  onboardedAt    DateTime?      @map("onboarded_at")
+  source         String         @default("manual") // always "manual" under the curated model
+  commissionRate Int            @default(1000) @map("commission_rate") // basis points, e.g. 1000 = 10%
+  maxListings    Int            @default(-1) @map("max_listings") // -1 = unlimited
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id])
+  listings Listing[]
+  payouts  Payout[]
+  follows  Follow[]
+
+  @@map("organizer_profiles")
+}
+
+// ---------------------------------------------------------------------
+// VENUE OWNER (cafe + club owners — admin-provisioned)
+// ---------------------------------------------------------------------
+
+model VenueOwnerProfile {
+  id             String         @id @default(cuid())
+  userId         String         @unique @map("user_id")
+  businessName   String         @map("business_name")
+  description    String?
+  approvalStatus ApprovalStatus @default(PENDING) @map("approval_status")
+  approvedBy     String?        @map("approved_by") // admin userId
+  approvedAt     DateTime?      @map("approved_at")
+  source         String         @default("manual")
+  commissionRate Int            @default(800) @map("commission_rate") // 8% default for venues
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user   User   @relation(fields: [userId], references: [id])
+  cafes  Cafe[]
+
+  @@map("venue_owner_profiles")
+}
+
+// ---------------------------------------------------------------------
+// CAFES — time-slot-based table bookings
+// ---------------------------------------------------------------------
+
+model Cafe {
+  id              String   @id @default(cuid())
+  listingId       String   @unique @map("listing_id")
+  ownerId         String   @map("owner_id")
+  description     String?
+  openingHours    Json?    @map("opening_hours") // { mon: { open: "10:00", close: "23:00" } }
+  avgMealCost     Int?     @map("avg_meal_cost") // for display: ₹800
+  cuisineTags     String[] @map("cuisine_tags") // ["Italian", "Rooftop"]
+  cancellationMins Int    @default(60) @map("cancellation_mins")
+  noShowMins      Int      @default(30) @map("no_show_mins")
+  status          String   @default("PENDING") @map("status") // PENDING, APPROVED, SUSPENDED
+  featured        Boolean  @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  listing         Listing  @relation(fields: [listingId], references: [id])
+  owner           VenueOwnerProfile @relation(fields: [ownerId], references: [id])
+  tables          CafeTable[]
+  bookings        CafeBooking[]
+  pricingTiers    CafePricingTier[]
+
+  @@map("cafes")
+}
+
+model CafeTable {
+  id              String      @id @default(cuid())
+  cafeId          String      @map("cafe_id")
+  label           String      // "Window Seat", "Private Room"
+  capacity        Int         // 2, 4, 6
+  basePricePerHr  Int         @map("base_price_per_hr") // in paise (30000 = ₹300/hr)
+  peakMultiplier  Float       @default(1.0) @map("peak_multiplier")
+  status          TableStatus @default(ACTIVE)
+  sortOrder       Int         @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  cafe            Cafe          @relation(fields: [cafeId], references: [id])
+  bookings        CafeBooking[]
+
+  @@unique([cafeId, label])
+  @@map("cafe_tables")
+}
+
+model CafeBooking {
+  id              String            @id @default(cuid())
+  cafeId          String            @map("cafe_id")
+  tableId         String            @map("table_id")
+  userId          String            @map("user_id")
+  orderId         String?           @map("order_id")
+  date            DateTime          @map("date") // date only
+  startTime       String            @map("start_time") // "19:00"
+  endTime         String            @map("end_time") // "21:00"
+  durationMins    Int               @map("duration_mins")
+  pricePerHr      Int               @map("price_per_hr") // snapshot at booking (paise)
+  totalAmount     Int               @map("total_amount") // in paise
+  status          CafeBookingStatus @default(PENDING)
+  guestCount      Int               @default(2) @map("guest_count")
+  specialRequests String?           @map("special_requests")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  cafe            Cafe          @relation(fields: [cafeId], references: [id])
+  table           CafeTable     @relation(fields: [tableId], references: [id])
+  user            User          @relation(fields: [userId], references: [id])
+  order           Order?        @relation(fields: [orderId], references: [id])
+
+  @@unique([tableId, date, startTime])
+  @@map("cafe_bookings")
+}
+
+model CafePricingTier {
+  id          String   @id @default(cuid())
+  cafeId      String   @map("cafe_id")
+  maxMinutes  Int      @map("max_minutes")
+  label       String   // "1 Hour", "1.5 Hours", "2 Hours"
+  price       Int      // in paise (30000 = ₹300)
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(0) @map("sort_order")
+
+  cafe Cafe @relation(fields: [cafeId], references: [id])
+
+  @@unique([cafeId, maxMinutes])
+  @@map("cafe_pricing_tiers")
+}
+
+// ---------------------------------------------------------------------
+// LEADS ("List Your Event" public enquiry — PRD Addendum Section 4)
+// ---------------------------------------------------------------------
+
+enum ListingType {
+  EVENT
+  ATTRACTION
+}
+
+enum VenueType {
+  CAFE
+  CLUB
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  MEETING_SCHEDULED
+  APPROVED
+  REJECTED
+}
+
+model EventLead {
+  id               String      @id @default(cuid())
+  name             String
+  email            String
+  phone            String
+  organization     String?
+  listingType      ListingType @map("listing_type")
+  category         String?
+  tentativeDate    DateTime?   @map("tentative_date")
+  city             String?
+  description      String?
+  expectedAudience Int?        @map("expected_audience")
+  status           LeadStatus  @default(NEW)
+  notes            String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("event_leads")
+}
+
+enum ListingStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+}
+
+enum BookingStatus {
+  OPEN
+  PAUSED
+  SOLD_OUT
+}
+
+enum CafeBookingStatus {
+  PENDING
+  CONFIRMED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum TableStatus {
+  ACTIVE
+  MAINTENANCE
+  HIDDEN
+}
+
+// ---------------------------------------------------------------------
+// LISTINGS — unified Events + Attractions (PRD Addendum Section 6)
+// ---------------------------------------------------------------------
+
+model Listing {
+  id          String      @id @default(cuid())
+  organizerId String      @map("organizer_id")
+  createdBy   String      @map("created_by")
+  listingType ListingType @map("listing_type")
+  venueType   VenueType?  @map("venue_type") // null = event, CAFE = cafe, CLUB = club
+
+  title       String
+  description String
+  category    String
+
+  bannerUrl         String   @map("banner_url")
+  galleryUrls       String[] @map("gallery_urls")
+  venueBlueprintUrl String?  @map("venue_blueprint_url")
+
+  venueName String @map("venue_name")
+  address   String
+  city      String
+  state     String
+
+  // Google Maps location link for buyers to navigate to the venue
+  googleMapsUrl String? @map("google_maps_url")
+
+  status        ListingStatus @default(DRAFT)
+  bookingStatus BookingStatus @default(OPEN) @map("booking_status")
+
+  // Admin curation
+  featured  Boolean   @default(false)
+  featuredAt DateTime? @map("featured_at")
+  premium   Boolean   @default(false)
+  premiumAt DateTime? @map("premium_at")
+  position  Int       @default(0)
+
+  // EVENT-only
+  eventDate DateTime? @map("event_date")
+
+  // ATTRACTION-only
+  operatingDays Json? @map("operating_days")
+
+  // -----------------------------
+  // Refund Policy
+  // -----------------------------
+
+  refundEnabled Boolean @default(true) @map("refund_enabled")
+
+  refundAllowedUntilDays Int @default(5) @map("refund_allowed_until_days")
+
+  convenienceFeePercent Decimal @default(10.00) @map("convenience_fee_percent") @db.Decimal(5, 2)
+
+  allowPartialRefunds Boolean @default(true) @map("allow_partial_refunds")
+  adminNotes          String?  @map("admin_notes")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organizer OrganizerProfile @relation(fields: [organizerId], references: [id])
+
+  ticketTypes   TicketType[]
+  capacitySlots CapacitySlot[]
+  orders        Order[]
+  reviews       Review[]
+  wishlistedBy  Wishlist[]
+  coupons       Coupon[]
+  cafe          Cafe?
+
+  @@index([status])
+  @@index([featured, featuredAt])
+  @@map("listings")
+}
+
+// ---------------------------------------------------------------------
+// TICKET TYPES & CAPACITY (PRD Addendum Section 15.3)
+// ---------------------------------------------------------------------
+
+model TicketType {
+  id            String  @id @default(cuid())
+  listingId     String  @map("listing_id")
+  name          String // e.g. "General", "VIP", "Adult", "Child"
+  description   String?
+  priceInPaise  Int     @map("price_in_paise")
+  totalQuantity Int     @map("total_quantity") // used for EVENT type; ATTRACTION uses CapacitySlot instead
+
+  // GST configuration for this ticket tier
+  gstPercent   Decimal @default(18.00) @map("gst_percent") @db.Decimal(5, 2)
+  gstInclusive Boolean @default(false) @map("gst_inclusive") // true = priceInPaise already includes GST
+
+  // Fee collected at the venue on check-in (e.g. club cover charge), not part of the online price
+  coverChargeInPaise Int @default(0) @map("cover_charge_in_paise")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  listing      Listing            @relation(fields: [listingId], references: [id])
+  orderItems   OrderItem[]
+  reservations OrderReservation[]
+
+  @@map("ticket_types")
+}
+
+// Per-day / per-slot capacity — ATTRACTIONS only (e.g. water park day passes, go-karting sessions)
+model CapacitySlot {
+  id            String        @id @default(cuid())
+  listingId     String        @map("listing_id")
+  date          DateTime
+  slotLabel     String        @default("FULL_DAY") @map("slot_label") // e.g. "10:00-10:15" for timed sessions; "FULL_DAY" for whole-day passes — kept non-null so the unique constraint below actually prevents duplicate rows (Postgres treats multiple NULLs as distinct, which would defeat it)
+  totalCapacity Int           @map("total_capacity")
+  bookedCount   Int           @default(0) @map("booked_count")
+  status        BookingStatus @default(OPEN)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  listing      Listing            @relation(fields: [listingId], references: [id])
+  orderItems   OrderItem[]
+  reservations OrderReservation[]
+
+  @@unique([listingId, date, slotLabel])
+  @@map("capacity_slots")
+}
+
+// ---------------------------------------------------------------------
+// RESERVATIONS — short-lived checkout holds (PRD Addendum Section 15.3 / 19.2)
+// ---------------------------------------------------------------------
+
+enum ReservationStatus {
+  HELD
+  CONFIRMED
+  EXPIRED
+}
+
+model OrderReservation {
+  id             String            @id @default(cuid())
+  userId         String            @map("user_id")
+  orderId        String?           @map("order_id")
+  ticketTypeId   String?           @map("ticket_type_id")
+  capacitySlotId String?           @map("capacity_slot_id")
+  quantity       Int
+  expiresAt      DateTime          @map("expires_at")
+  status         ReservationStatus @default(HELD)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user         User          @relation(fields: [userId], references: [id])
+  order        Order?        @relation(fields: [orderId], references: [id])
+  ticketType   TicketType?   @relation(fields: [ticketTypeId], references: [id])
+  capacitySlot CapacitySlot? @relation(fields: [capacitySlotId], references: [id])
+
+  @@index([userId])
+  @@index([ticketTypeId])
+  @@map("order_reservations")
+}
+
+// ---------------------------------------------------------------------
+// ORDERS
+// ---------------------------------------------------------------------
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+model Order {
+  id                    String      @id @default(cuid())
+  userId                String      @map("user_id")
+  listingId             String      @map("listing_id")
+  status                OrderStatus @default(PENDING)
+  subtotalInPaise       Int         @map("subtotal_in_paise")
+  gstAmountInPaise      Int         @map("gst_amount_in_paise")
+  convenienceFeeInPaise Int         @default(0) @map("convenience_fee_in_paise")
+  tcsAmountInPaise      Int         @default(0) @map("tcs_amount_in_paise")
+  totalInPaise          Int         @map("total_in_paise")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user         User               @relation(fields: [userId], references: [id])
+  listing      Listing            @relation(fields: [listingId], references: [id])
+  reservations OrderReservation[]
+  items        OrderItem[]
+  payment      Payment?
+  refunds      Refund[]
+  tickets      Ticket[]
+  cafeBookings CafeBooking[]
+
+  @@index([userId])
+  @@index([listingId])
+  @@index([status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id             String  @id @default(cuid())
+  orderId        String  @map("order_id")
+  ticketTypeId   String? @map("ticket_type_id")
+  capacitySlotId String? @map("capacity_slot_id")
+
+  quantity Int
+
+  // -----------------------------
+  // Snapshot at purchase time
+  // -----------------------------
+  ticketName   String @map("ticket_name")
+  priceInPaise Int    @map("price_in_paise")
+
+  gstPercent       Decimal @map("gst_percent") @db.Decimal(5, 2)
+  gstAmountInPaise Int     @map("gst_amount_in_paise")
+
+  // Net (pre-GST) sales base + inclusivity flag captured at purchase time
+  netInPaise   Int     @default(0) @map("net_in_paise")
+  gstInclusive Boolean @default(false) @map("gst_inclusive")
+
+  order        Order         @relation(fields: [orderId], references: [id])
+  ticketType   TicketType?   @relation(fields: [ticketTypeId], references: [id])
+  capacitySlot CapacitySlot? @relation(fields: [capacitySlotId], references: [id])
+  tickets      Ticket[]
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+// ---------------------------------------------------------------------
+// PAYMENTS (Customer Payments)
+// ---------------------------------------------------------------------
+
+enum PaymentGateway {
+  RAZORPAY
+  CASHFREE
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  SUCCESS
+  FAILED
+}
+
+model Payment {
+  id String @id @default(cuid())
+
+  // One payment record per order
+  orderId String @unique @map("order_id")
+
+  refunds Refund[]
+
+  // Gateway information
+  gateway PaymentGateway
+
+  // Gateway-generated identifiers
+  gatewayOrderId   String? @map("gateway_order_id")
+  gatewayPaymentId String? @map("gateway_payment_id")
+  gatewaySignature String? @map("gateway_signature")
+
+  // Payment lifecycle
+  status PaymentStatus @default(PENDING)
+
+  // Amount information
+  amountInPaise Int    @map("amount_in_paise")
+  currency      String @default("INR")
+
+  // Gateway metadata
+  paymentMethod String? @map("payment_method")
+  failureReason String? @map("failure_reason")
+
+  // Complete gateway payload for debugging/auditing
+  gatewayResponse Json? @map("gateway_response")
+
+  // Prevent duplicate payment creation
+  idempotencyKey String @unique @map("idempotency_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@map("payments")
+}
+
+// Durable log of every gateway webhook received — used for reconciliation
+model PaymentWebhookEvent {
+  id          String         @id @default(cuid())
+  gateway     PaymentGateway
+  eventType   String         @map("event_type")
+  payload     Json
+  processedAt DateTime?      @map("processed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("payment_webhook_events")
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  RELEASED
+  FAILED
+}
+
+model Payout {
+  id String @id @default(cuid())
+
+  organizerId String @map("organizer_id")
+
+  // Settlement breakdown
+  grossTicketAmountInPaise Int @map("gross_ticket_amount_in_paise")
+
+  commissionPercent Decimal @map("commission_percent") @db.Decimal(5, 2)
+
+  commissionAmountInPaise Int @map("commission_amount_in_paise")
+
+  gstOnCommissionInPaise Int @default(0) @map("gst_on_commission_in_paise")
+
+  tcsDeductedInPaise Int @default(0) @map("tcs_deducted_in_paise")
+
+  netPayoutInPaise Int @map("net_payout_in_paise")
+
+  status PayoutStatus @default(PENDING)
+
+  releasedAt DateTime? @map("released_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organizer OrganizerProfile @relation(fields: [organizerId], references: [id])
+
+  @@index([organizerId])
+  @@map("payouts")
+}
+
+// ---------------------------------------------------------------------
+// PLATFORM SETTINGS
+// ---------------------------------------------------------------------
+
+model PlatformSettings {
+  id String @id @default(cuid())
+
+  // Customer booking fee (%)
+  bookingFeePercent Decimal @default(3.00) @map("booking_fee_percent") @db.Decimal(5, 2)
+
+  // Deduction applied during refunds (%)
+  refundDeductionPercent Decimal @default(10.00) @map("refund_deduction_percent") @db.Decimal(5, 2)
+
+  // Tax Collected at Source (%)
+  tcsPercent Decimal @default(1.00) @map("tcs_percent") @db.Decimal(5, 2)
+
+  // Default GST charged on booking fee
+  bookingFeeGstPercent Decimal @default(18.00) @map("booking_fee_gst_percent") @db.Decimal(5, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("platform_settings")
+}
+
+// ---------------------------------------------------------------------
+// REFUNDS
+// ---------------------------------------------------------------------
+
+enum RefundReason {
+  USER_REQUESTED
+  ORGANIZER_CANCELLED
+  EVENT_CANCELLED
+}
+
+enum RefundStatus {
+  INITIATED
+  PROCESSING
+  PROCESSED
+  FAILED
+  REJECTED
+}
+
+model Refund {
+  id String @id @default(cuid())
+
+  orderId   String @map("order_id")
+  paymentId String @map("payment_id")
+
+  reason RefundReason
+
+  totalAmountInPaise Int @map("total_amount_in_paise")
+
+  convenienceFeeInPaise Int @default(0) @map("convenience_fee_in_paise")
+
+  gstReversedInPaise Int @default(0) @map("gst_reversed_in_paise")
+
+  finalRefundAmountInPaise Int @map("final_refund_amount_in_paise")
+
+  status RefundStatus @default(INITIATED)
+
+  initiatedById String @map("initiated_by")
+
+  gatewayRefundId String? @unique @map("gateway_refund_id")
+
+  failureReason String? @map("failure_reason")
+
+  processedAt DateTime? @map("processed_at")
+
+  gatewayResponse Json? @map("gateway_response")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+
+  initiatedByUser User @relation("RefundInitiatedBy", fields: [initiatedById], references: [id])
+
+  items RefundItem[]
+
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([initiatedById])
+  @@index([status])
+  @@map("refunds")
+}
+
+model RefundItem {
+  id String @id @default(cuid())
+
+  refundId String @map("refund_id")
+  ticketId String @map("ticket_id")
+
+  // Snapshot of refunded ticket
+  ticketPriceInPaise Int @map("ticket_price_in_paise")
+
+  deductionInPaise Int @map("deduction_in_paise")
+
+  refundAmountInPaise Int @map("refund_amount_in_paise")
+
+  gstAmountInPaise Int @map("gst_amount_in_paise")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  refund Refund @relation(fields: [refundId], references: [id])
+
+  ticket Ticket @relation(fields: [ticketId], references: [id])
+
+  @@unique([refundId, ticketId])
+  @@index([refundId])
+  @@index([ticketId])
+  @@map("refund_items")
+}
+
+// ---------------------------------------------------------------------
+// TICKETS & CHECK-IN
+// ---------------------------------------------------------------------
+
+enum TicketStatus {
+  ACTIVE
+  USED
+  CANCELLED
+  REFUNDED
+}
+
+model Ticket {
+  id String @id @default(cuid())
+
+  orderId     String @map("order_id")
+  orderItemId String @map("order_item_id")
+
+  ticketNumber String @unique @map("ticket_number")
+  qrCode       String @unique @map("qr_code")
+
+  status TicketStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  order       Order        @relation(fields: [orderId], references: [id])
+  orderItem   OrderItem    @relation(fields: [orderItemId], references: [id])
+  checkIn     CheckIn?
+  refundItems RefundItem[]
+
+  @@index([orderId])
+  @@index([orderItemId])
+  @@index([status])
+  @@map("tickets")
+}
+
+model CheckIn {
+  id String @id @default(cuid())
+
+  ticketId String @unique @map("ticket_id")
+
+  scannedBy    String   @map("scanned_by")
+  scannedAt    DateTime @default(now()) @map("scanned_at")
+  gateLocation String?  @map("gate_location")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id])
+
+  scannedByUser User @relation("ScannedBy", fields: [scannedBy], references: [id])
+
+  @@index([scannedBy])
+  @@map("check_ins")
+}
+
+// ---------------------------------------------------------------------
+// ENGAGEMENT — reviews, wishlist, follows, coupons, notifications
+// ---------------------------------------------------------------------
+
+model Review {
+  id        String  @id @default(cuid())
+  listingId String  @map("listing_id")
+  userId    String  @map("user_id")
+  rating    Int // 1-5
+  comment   String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  listing Listing @relation(fields: [listingId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([listingId, userId])
+  @@map("reviews")
+}
+
+model Wishlist {
+  userId    String @map("user_id")
+  listingId String @map("listing_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id])
+  listing Listing @relation(fields: [listingId], references: [id])
+
+  @@id([userId, listingId])
+  @@map("wishlists")
+}
+
+model Follow {
+  userId      String @map("user_id")
+  organizerId String @map("organizer_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user      User             @relation(fields: [userId], references: [id])
+  organizer OrganizerProfile @relation(fields: [organizerId], references: [id])
+
+  @@id([userId, organizerId])
+  @@map("follows")
+}
+
+enum CouponDiscountType {
+  PERCENTAGE
+  FLAT
+}
+
+model Coupon {
+  id           String             @id @default(cuid())
+  listingId    String?            @map("listing_id") // null = platform-wide coupon
+  code         String             @unique
+  discountType CouponDiscountType @map("discount_type")
+  value        Int // percentage (0-100) or flat amount in paise, per discountType
+  validFrom    DateTime           @map("valid_from")
+  validTo      DateTime           @map("valid_to")
+  maxUses      Int?               @map("max_uses")
+  usedCount    Int                @default(0) @map("used_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  listing Listing? @relation(fields: [listingId], references: [id])
+
+  @@map("coupons")
+}
+
+model Notification {
+  id      String  @id @default(cuid())
+  userId  String  @map("user_id")
+  type    String // e.g. "booking_confirmed", "refund_processed", "event_reminder"
+  message String
+  read    Boolean @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("notifications")
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  action      String
+  targetId    String   @map("target_id")
+  performedBy String   @map("performed_by")
+  notes       String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  admin User @relation(fields: [performedBy], references: [id])
+
+  @@index([targetId])
+  @@index([performedBy])
+  @@index([action])
+  @@map("audit_logs")
+}
