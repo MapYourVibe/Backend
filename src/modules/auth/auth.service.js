@@ -35,11 +35,12 @@ async function signup({ name, email, phone, password }) {
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const user = await prisma.user.update({
       where: { id: existing.id },
-      data: { name, passwordHash, phone: phone ?? existing.phone, emailVerified: true },
+      data: { name, passwordHash, phone: phone ?? existing.phone },
     });
 
-    const token = issueToken(user);
-    return { user: sanitizeUser(user), token };
+    sendVerificationOtp(user).catch(() => {});
+
+    return { user: sanitizeUser(user) };
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -70,12 +71,12 @@ async function login({ email, password }) {
     throw new AppError("Invalid email or password", 401);
   }
 
-  // if (!user.emailVerified) {
-  //   throw new AppError(
-  //     "Please verify your email first. Check your inbox for a 6-digit code to activate your account.",
-  //     403,
-  //   );
-  // }
+  if (!user.emailVerified) {
+    throw new AppError(
+      "Please verify your email first. Check your inbox for a 6-digit code to activate your account.",
+      403,
+    );
+  }
 
   const token = issueToken(user);
   return { user: sanitizeUser(user), token };

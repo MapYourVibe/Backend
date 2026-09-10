@@ -25,9 +25,11 @@ const CLEAR_COOKIE_OPTIONS = {
 
 async function signup(req, res, next) {
   try {
-    const { user, token } = await authService.signup(req.body);
+    const result = await authService.signup(req.body);
+    const { user } = result;
+    const token = result.token ?? null;
     // Don't auto-login: account must be email-verified before the token is usable.
-    if (user.emailVerified) {
+    if (token && user.emailVerified) {
       res.cookie("token", token, COOKIE_OPTIONS);
     }
     return success(res, { data: { user, token }, message: "Account created successfully. Check your email for a verification code.", statusCode: 201 });
