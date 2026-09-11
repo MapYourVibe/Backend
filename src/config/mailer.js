@@ -10,27 +10,26 @@ async function sendMail({ to, subject, html }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.error("[mailer] RESEND_API_KEY not set — email not sent:", subject, "->", to);
-    return;
+    throw new Error("RESEND_API_KEY not configured");
   }
 
   const from = env.EMAIL_FROM || "MapYourVibe <onboarding@resend.dev>";
+  console.log("[mailer] Sending email:", { from, to, subject });
 
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ from, to, subject, html }),
-    });
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ from, to, subject, html }),
+  });
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.error("[mailer] Resend API error:", res.status, body);
-    }
-  } catch (err) {
-    console.error("[mailer] Email send failed:", err.message);
+  const body = await res.text().catch(() => "");
+  console.log("[mailer] Resend response:", res.status, body);
+
+  if (!res.ok) {
+    throw new Error(`Resend API error ${res.status}: ${body}`);
   }
 }
 
