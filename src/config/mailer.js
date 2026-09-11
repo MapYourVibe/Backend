@@ -13,7 +13,7 @@ async function sendMail({ to, subject, html }) {
     throw new Error("RESEND_API_KEY not configured");
   }
 
-  const from = env.EMAIL_FROM || "MapYourVibe <onboarding@resend.dev>";
+  const from = (process.env.EMAIL_FROM || env.EMAIL_FROM || "no-reply@mapyourvibe.com").trim();
   console.log("[mailer] Sending email:", { from, to, subject });
 
   const res = await fetch("https://api.resend.com/emails", {
