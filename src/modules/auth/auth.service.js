@@ -38,7 +38,7 @@ async function signup({ name, email, phone, password }) {
       data: { name, passwordHash, phone: phone ?? existing.phone },
     });
 
-    sendVerificationOtp(user).catch(() => {});
+    await sendVerificationOtp(user);
 
     return { user: sanitizeUser(user) };
   }
@@ -49,8 +49,7 @@ async function signup({ name, email, phone, password }) {
     data: { name, email, phone, passwordHash, role: "USER", emailVerified: false },
   });
 
-  // Fire-and-forget the verification OTP — never block signup on mailer latency.
-  sendVerificationOtp(user).catch(() => {});
+  await sendVerificationOtp(user);
 
   const token = issueToken(user);
   return { user: sanitizeUser(user), token };
