@@ -51,13 +51,9 @@ const envSchema = z.object({
   CLOUDINARY_API_KEY: z.string(),
   CLOUDINARY_API_SECRET: z.string(),
 
-  // Email — Brevo (Sendinblue) SMTP. Free tier: 300 emails/day.
-  // Get SMTP creds from Brevo: Settings → SMTP & API → SMTP.
-  EMAIL_FROM: z.string().email(),
-  SMTP_HOST: z.string().optional(),
-  SMTP_PORT: z.coerce.number().optional(),
-  SMTP_USER: z.string().optional(),
-  SMTP_PASS: z.string().optional(),
+  // Email — Resend HTTP API. Set EMAIL_FROM to a verified domain address
+  // (e.g. "no-reply@mapyourvibe.com"). Falls back to Resend's default sandbox.
+  EMAIL_FROM: z.string().email().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
