@@ -123,11 +123,26 @@ const resumeEvent = async (req, res, next) => {
   }
 };
 
+const updateTicketType = async (req, res, next) => {
+  try {
+    const updated = await eventService.updateTicketType(
+      req.params.eventId,
+      req.params.ticketTypeId,
+      req.body,
+      req.user.id,
+    );
+    return success(res, { data: updated, message: "Ticket type updated successfully." });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createEvent,
   listEvents,
   getEventDetail,
   updateEvent,
+  updateTicketType,
   adminReview,
   markSoldOut,
   adminEventDetail,

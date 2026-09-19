@@ -12,6 +12,7 @@ const {
   reviewEventSchema,
   eventIdParamSchema,
   toggleFeaturedSchema,
+  updateTicketTypeSchema,
 } = require("./event.validation");
 
 // Admin & Operations — Event Curation + Detail
@@ -57,6 +58,15 @@ router.patch(
   requireRole("ADMIN", "OPS"),
   validate(eventIdParamSchema),
   eventController.resumeEvent,
+);
+
+// Organizer — Ticket Type Price Update
+router.patch(
+  "/:eventId/ticket-types/:ticketTypeId",
+  requireAuth,
+  requireRole("ORGANIZER", "ADMIN"),
+  validate(updateTicketTypeSchema),
+  eventController.updateTicketType,
 );
 
 // Public Access Discovery & Detail Mapping Feeds

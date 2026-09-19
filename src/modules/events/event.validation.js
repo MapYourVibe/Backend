@@ -83,10 +83,25 @@ const toggleFeaturedSchema = z.object({
   }),
 });
 
+const updateTicketTypeSchema = z.object({
+  params: z.object({
+    eventId: z.string().cuid({ message: "Invalid Event ID format." }),
+    ticketTypeId: z.string().cuid({ message: "Invalid Ticket Type ID format." }),
+  }),
+  body: z.object({
+    priceInPaise: z.number().int().positive().optional(),
+    name: z.string().trim().min(2).optional(),
+    gstPercent: z.number().min(0).max(28).optional(),
+    gstInclusive: z.boolean().optional(),
+    coverChargeInPaise: z.number().int().nonnegative().optional(),
+  }),
+});
+
 module.exports = {
   createEventSchema,
   updateEventSchema,
   reviewEventSchema,
   eventIdParamSchema,
   toggleFeaturedSchema,
+  updateTicketTypeSchema,
 };

@@ -65,6 +65,18 @@ const createEventListing = async (listingData, organizerUserId) => {
 const queryEvents = async (queryFilters = {}) => {
   const { city, category, type, search, status, scope } = queryFilters;
 
+  // Expand city name to include known aliases (e.g. "Gurugram" → ["Gurugram", "Gurgaon"])
+  const CITY_ALIAS_MAP = {
+    Gurugram: ["Gurugram", "Gurgaon"],
+    Bengaluru: ["Bengaluru", "Bangalore"],
+    Mumbai: ["Mumbai", "Bombay"],
+    Chennai: ["Chennai", "Madras"],
+    Kolkata: ["Kolkata", "Calcutta"],
+    Kochi: ["Kochi", "Cochin"],
+    Mysuru: ["Mysuru", "Mysore"],
+  };
+  const cityValues = city ? (CITY_ALIAS_MAP[city] || [city]) : null;
+
   return prisma.listing.findMany({
     where: {
       ...(status === "all"
@@ -72,7 +84,7 @@ const queryEvents = async (queryFilters = {}) => {
         : { status: status ?? "PUBLISHED" }),
       ...(type ? { listingType: type } : {}),
       ...(category ? { category: { equals: category, mode: "insensitive" } } : {}),
-      ...(city ? { city: { equals: city, mode: "insensitive" } } : {}),
+      ...(cityValues ? { city: { in: cityValues, mode: "insensitive" } } : {}),
       ...(search
         ? {
             OR: [
@@ -148,6 +160,28 @@ const markEventSoldOut = async (eventId, organizerUserId) => {
     where: { id: eventId },
     data: { bookingStatus: "SOLD_OUT" },
   });
+};
+
+const updateTicketType = async (eventId, ticketTypeId, updateData, organizerUserId) => {
+  const listing = await getEventById(eventId);
+
+  if (listing.organizer.userId !== organizerUserId) {
+    throw new AppError("Access denied. You do not own this listing.", 403);
+  }
+
+  const ticketType = await prisma.ticketType.findUnique({ where: { id: ticketTypeId } });
+  if (!ticketType || ticketType.listingId !== eventId) {
+    throw new AppError("Ticket type not found for this event.", 404);
+  }
+
+  const allowed = {};
+  if (updateData.priceInPaise !== undefined) allowed.priceInPaise = updateData.priceInPaise;
+  if (updateData.name !== undefined) allowed.name = updateData.name;
+  if (updateData.gstPercent !== undefined) allowed.gstPercent = updateData.gstPercent;
+  if (updateData.gstInclusive !== undefined) allowed.gstInclusive = updateData.gstInclusive;
+  if (updateData.coverChargeInPaise !== undefined) allowed.coverChargeInPaise = updateData.coverChargeInPaise;
+
+  return prisma.ticketType.update({ where: { id: ticketTypeId }, data: allowed });
 };
 
 // ---------------------------------------------------------------------------
@@ -358,6 +392,7 @@ module.exports = {
   queryEvents,
   getEventById,
   updateEventListing,
+  updateTicketType,
   adminReviewListing,
   markEventSoldOut,
   toggleListingFeatured,

@@ -241,10 +241,11 @@ const fetchOrganizerEvents = async (organizerUserId) => {
         select: {
           id: true,
           name: true,
+          priceInPaise: true,
           totalQuantity: true,
           orderItems: {
             where: { order: { status: { in: ["CONFIRMED", "PARTIALLY_REFUNDED"] } } },
-            select: { id: true, quantity: true },
+            select: { id: true, quantity: true, priceInPaise: true },
           },
         },
       },
@@ -258,12 +259,25 @@ const fetchOrganizerEvents = async (organizerUserId) => {
       0,
     );
     const totalCapacity = l.ticketTypes.reduce((sum, tt) => sum + tt.totalQuantity, 0);
-    const ticketBreakdown = l.ticketTypes.map((tt) => ({
-      id: tt.id,
-      name: tt.name,
-      totalQuantity: tt.totalQuantity,
-      soldCount: tt.orderItems.reduce((s, oi) => s + oi.quantity, 0),
-    }));
+    const ticketBreakdown = l.ticketTypes.map((tt) => {
+      const soldCount = tt.orderItems.reduce((s, oi) => s + oi.quantity, 0);
+      const priceHistoryMap = {};
+      for (const oi of tt.orderItems) {
+        const p = oi.priceInPaise;
+        priceHistoryMap[p] = (priceHistoryMap[p] || 0) + oi.quantity;
+      }
+      const priceHistory = Object.entries(priceHistoryMap)
+        .map(([priceInPaise, count]) => ({ priceInPaise: Number(priceInPaise), soldCount: count }))
+        .sort((a, b) => a.priceInPaise - b.priceInPaise);
+      return {
+        id: tt.id,
+        name: tt.name,
+        currentPrice: tt.priceInPaise,
+        totalQuantity: tt.totalQuantity,
+        soldCount,
+        priceHistory,
+      };
+    });
 
     return {
       id: l.id,
@@ -294,7 +308,7 @@ const fetchOrganizerEventDetail = async (organizerUserId, eventId) => {
         include: {
           orderItems: {
             where: { order: { status: { in: ["CONFIRMED", "PARTIALLY_REFUNDED"] } } },
-            select: { id: true, quantity: true },
+            select: { id: true, quantity: true, priceInPaise: true },
           },
         },
       },
@@ -320,12 +334,25 @@ const fetchOrganizerEventDetail = async (organizerUserId, eventId) => {
     bookingStatus: listing.bookingStatus,
     totalTicketsSold: totalSold,
     totalCapacity,
-    ticketBreakdown: listing.ticketTypes.map((tt) => ({
-      id: tt.id,
-      name: tt.name,
-      totalQuantity: tt.totalQuantity,
-      soldCount: tt.orderItems.reduce((s, oi) => s + oi.quantity, 0),
-    })),
+    ticketBreakdown: listing.ticketTypes.map((tt) => {
+      const soldCount = tt.orderItems.reduce((s, oi) => s + oi.quantity, 0);
+      const priceHistoryMap = {};
+      for (const oi of tt.orderItems) {
+        const p = oi.priceInPaise;
+        priceHistoryMap[p] = (priceHistoryMap[p] || 0) + oi.quantity;
+      }
+      const priceHistory = Object.entries(priceHistoryMap)
+        .map(([priceInPaise, count]) => ({ priceInPaise: Number(priceInPaise), soldCount: count }))
+        .sort((a, b) => a.priceInPaise - b.priceInPaise);
+      return {
+        id: tt.id,
+        name: tt.name,
+        currentPrice: tt.priceInPaise,
+        totalQuantity: tt.totalQuantity,
+        soldCount,
+        priceHistory,
+      };
+    }),
   };
 };
 

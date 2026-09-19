@@ -3,6 +3,7 @@ const { prisma } = require("../../config/db");
 const env = require("../../config/env");
 const AppError = require("../../utils/AppError");
 const razorpayGateway = require("./gateways/razorpay.gateway");
+const { sendBookingConfirmationEmail } = require("../tickets/ticket.mail");
 
 const createPayment = async ({ orderId, userId }) => {
   const order = await prisma.order.findUnique({
@@ -248,6 +249,12 @@ const verifyPayment = async ({
       updatedOrder,
     };
   });
+
+  // Fire-and-forget: booking email with tickets. Never blocks/avoids failing payment.
+  // Idempotency: the SUCCESS early-return above means this only runs on first confirmation.
+  sendBookingConfirmationEmail(result.updatedOrder.id).catch((err) =>
+    console.error("[booking-email] trigger failed:", err.message),
+  );
 
   return {
     paymentId: result.updatedPayment.id,
