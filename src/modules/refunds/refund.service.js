@@ -1,6 +1,7 @@
 const { prisma } = require("../../config/db");
 const AppError = require("../../utils/AppError");
 const refundGateway = require("../payments/gateways/refund.gateway");
+const { syncListingBookingStatus } = require("../events/event.service");
 
 /**
  * Maps Razorpay refund status strings to the internal database RefundStatus enum.
@@ -282,21 +283,12 @@ const createRefund = async ({ userId, ticketIds, reason }) => {
       throw new AppError("One or more tickets have already been processed for refunds.", 409);
     }
 
-    // Adjust event inventory balances back to core capacity slots
+    // Adjust capacity-slot balances back (attractions track bookedCount per slot).
+    // NOTE: TicketType has no bookedCount column — event sales are counted from
+    // confirmed OrderItems, so there is nothing to decrement here. (The old
+    // ticketType.bookedCount decrement referenced a non-existent field and
+    // crashed every event-ticket refund.)
     for (const ticket of tickets) {
-      if (ticket.orderItem.ticketTypeId) {
-        await tx.ticketType.update({
-          where: {
-            id: ticket.orderItem.ticketTypeId,
-          },
-          data: {
-            bookedCount: {
-              decrement: 1,
-            },
-          },
-        });
-      }
-
       if (ticket.orderItem.capacitySlotId) {
         await tx.capacitySlot.update({
           where: {
@@ -338,6 +330,9 @@ const createRefund = async ({ userId, ticketIds, reason }) => {
         },
       });
     }
+
+    // Reopen a SOLD_OUT event if this refund freed capacity.
+    await syncListingBookingStatus(tx, listing.id);
 
     return {
       refundId: updatedRefund.id,

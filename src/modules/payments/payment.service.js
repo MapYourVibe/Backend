@@ -4,6 +4,7 @@ const env = require("../../config/env");
 const AppError = require("../../utils/AppError");
 const razorpayGateway = require("./gateways/razorpay.gateway");
 const { sendBookingConfirmationEmail } = require("../tickets/ticket.mail");
+const { syncListingBookingStatus } = require("../events/event.service");
 
 const createPayment = async ({ orderId, userId }) => {
   const order = await prisma.order.findUnique({
@@ -228,21 +229,24 @@ const verifyPayment = async ({
       },
     });
 
-    // ✅ Atomic Ticket Generation Loop: Creates secure access assets instantly upon verification
+    // ✅ Group entry: ONE ticket row per order item. entriesAllowed = quantity.
+    // First (single) scan flips it to USED; organizer issues N bands.
     for (const item of payment.order.items) {
-      for (let i = 0; i < item.quantity; i++) {
-        const uniqueToken = crypto.randomBytes(6).toString("hex").toUpperCase();
-        await tx.ticket.create({
-          data: {
-            orderId: payment.orderId,
-            orderItemId: item.id,
-            ticketNumber: `TIC-${item.id.slice(-6)}-${uniqueToken}`,
-            qrCode: `QR-${item.id.slice(-6)}-${uniqueToken}`,
-            status: "ACTIVE",
-          },
-        });
-      }
+      const uniqueToken = crypto.randomBytes(6).toString("hex").toUpperCase();
+      await tx.ticket.create({
+        data: {
+          orderId: payment.orderId,
+          orderItemId: item.id,
+          ticketNumber: `TIC-${item.id.slice(-6)}-${uniqueToken}`,
+          qrCode: `QR-${item.id.slice(-6)}-${uniqueToken}`,
+          status: "ACTIVE",
+          entriesAllowed: item.quantity,
+        },
+      });
     }
+
+    // Auto SOLD_OUT (or self-healing reopen) when confirmed sales exhaust capacity.
+    await syncListingBookingStatus(tx, payment.order.listingId);
 
     return {
       updatedPayment,
@@ -380,21 +384,24 @@ const handlePaymentCaptured = async ({ payload, signature }) => {
       },
     });
 
-    // ✅ Asynchronous Webhook Ticket Generation Fallback Loop
+    // ✅ Group entry (webhook fallback keeps parity with verifyPayment):
+    // ONE ticket row per order item; entriesAllowed = quantity.
     for (const item of payment.order.items) {
-      for (let i = 0; i < item.quantity; i++) {
-        const uniqueToken = crypto.randomBytes(6).toString("hex").toUpperCase();
-        await tx.ticket.create({
-          data: {
-            orderId: payment.orderId,
-            orderItemId: item.id,
-            ticketNumber: `TIC-${item.id.slice(-6)}-${uniqueToken}`,
-            qrCode: `QR-${item.id.slice(-6)}-${uniqueToken}`,
-            status: "ACTIVE",
-          },
-        });
-      }
+      const uniqueToken = crypto.randomBytes(6).toString("hex").toUpperCase();
+      await tx.ticket.create({
+        data: {
+          orderId: payment.orderId,
+          orderItemId: item.id,
+          ticketNumber: `TIC-${item.id.slice(-6)}-${uniqueToken}`,
+          qrCode: `QR-${item.id.slice(-6)}-${uniqueToken}`,
+          status: "ACTIVE",
+          entriesAllowed: item.quantity,
+        },
+      });
     }
+
+    // Auto SOLD_OUT (or self-healing reopen) when confirmed sales exhaust capacity.
+    await syncListingBookingStatus(tx, payment.order.listingId);
 
     return {
       updatedPayment,

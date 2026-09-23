@@ -90,12 +90,17 @@ const scanTicket = async ({ ticketNumber, scannedBy, scannerRole }) => {
     };
   });
 
-  // 7. Return clean response payload
+  // 7. Return clean response payload — includes tier + admits-N so the
+  // scanner UI can show e.g. "Admit 2 — General entry".
   return {
     ticketId: result.ticketId,
     ticketNumber,
     ticketStatus: result.status,
     checkedInAt: result.checkIn.scannedAt,
+    tierName:
+      ticket.orderItem.ticketType?.name ?? ticket.orderItem.ticketName ?? "General",
+    entriesAllowed: ticket.entriesAllowed ?? 1,
+    eventTitle: ticket.orderItem.ticketType?.listing?.title ?? "Event",
   };
 };
 

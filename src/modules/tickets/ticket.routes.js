@@ -33,6 +33,7 @@ router.get("/my", auth, async (req, res, next) => {
       ticketNumber: t.ticketNumber,
       status: t.status,
       qrCode: t.qrCode,
+      entriesAllowed: t.entriesAllowed ?? 1,
       createdAt: t.createdAt,
       title: t.orderItem.ticketType?.listing?.title || t.orderItem.capacitySlot?.listing?.title || "Event",
       venue: t.orderItem.ticketType?.listing?.venueName || t.orderItem.capacitySlot?.venueName || "",

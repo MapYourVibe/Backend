@@ -757,6 +757,10 @@ model Ticket {
   ticketNumber String @unique @map("ticket_number")
   qrCode       String @unique @map("qr_code")
 
+  // Group entry: one ticket row can admit N people (one row per order item).
+  // Single-burn: first scan flips status to USED, organizer issues N bands.
+  entriesAllowed Int @default(1) @map("entries_allowed")
+
   status TicketStatus @default(ACTIVE)
 
   createdAt DateTime @default(now()) @map("created_at")

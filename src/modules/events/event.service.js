@@ -121,7 +121,41 @@ const getEventById = async (id) => {
   if (!listing) {
     throw new AppError("Event or Attraction listing record not found.", 404);
   }
-  return listing;
+
+  // Per-tier tickets left for public display: total minus confirmed sales
+  // minus live checkout holds (so the page never shows phantom availability).
+  const remainingByType = {};
+  await Promise.all(
+    listing.ticketTypes.map(async (tt) => {
+      const sold = await prisma.orderItem.aggregate({
+        _sum: { quantity: true },
+        where: {
+          ticketTypeId: tt.id,
+          order: { status: { in: ["CONFIRMED", "PARTIALLY_REFUNDED"] } },
+        },
+      });
+      const held = await prisma.orderReservation.aggregate({
+        _sum: { quantity: true },
+        where: {
+          ticketTypeId: tt.id,
+          status: "HELD",
+          expiresAt: { gt: new Date() },
+        },
+      });
+      remainingByType[tt.id] = Math.max(
+        0,
+        tt.totalQuantity - (sold._sum.quantity ?? 0) - (held._sum.quantity ?? 0),
+      );
+    }),
+  );
+
+  return {
+    ...listing,
+    ticketTypes: listing.ticketTypes.map((tt) => ({
+      ...tt,
+      remaining: remainingByType[tt.id] ?? tt.totalQuantity,
+    })),
+  };
 };
 
 const updateEventListing = async (id, updateData, organizerUserId) => {
@@ -160,6 +194,48 @@ const markEventSoldOut = async (eventId, organizerUserId) => {
     where: { id: eventId },
     data: { bookingStatus: "SOLD_OUT" },
   });
+};
+
+// ---------------------------------------------------------------------------
+// Automatic booking-status sync (sold out <-> open).
+// Runs INSIDE the caller's transaction (payments confirm, refunds) so the
+// status flip is atomic with the sale/refund that caused it.
+// Only ever transitions between OPEN and SOLD_OUT — PAUSED (admin-suspended)
+// listings are never touched here.
+// ---------------------------------------------------------------------------
+const syncListingBookingStatus = async (tx, listingId) => {
+  const listing = await tx.listing.findUnique({
+    where: { id: listingId },
+    select: {
+      bookingStatus: true,
+      ticketTypes: { select: { totalQuantity: true } },
+    },
+  });
+  if (!listing) return;
+
+  const capacity = listing.ticketTypes.reduce((s, tt) => s + tt.totalQuantity, 0);
+  if (capacity === 0) return; // nothing trackable (e.g. attraction-only listing)
+
+  const soldAgg = await tx.orderItem.aggregate({
+    _sum: { quantity: true },
+    where: {
+      ticketType: { listingId },
+      order: { status: { in: ["CONFIRMED", "PARTIALLY_REFUNDED"] } },
+    },
+  });
+  const sold = soldAgg._sum.quantity ?? 0;
+
+  if (sold >= capacity && listing.bookingStatus === "OPEN") {
+    await tx.listing.update({
+      where: { id: listingId },
+      data: { bookingStatus: "SOLD_OUT" },
+    });
+  } else if (sold < capacity && listing.bookingStatus === "SOLD_OUT") {
+    await tx.listing.update({
+      where: { id: listingId },
+      data: { bookingStatus: "OPEN" },
+    });
+  }
 };
 
 const updateTicketType = async (eventId, ticketTypeId, updateData, organizerUserId) => {
@@ -395,10 +471,11 @@ module.exports = {
   updateTicketType,
   adminReviewListing,
   markEventSoldOut,
+  syncListingBookingStatus,
+  getAdminEventDetail,
   toggleListingFeatured,
   toggleListingPremium,
   updateEventPosition,
   suspendListing,
   resumeListing,
-  getAdminEventDetail,
 };
