@@ -31,12 +31,12 @@ const formatEventDate = (eventDate) => {
   });
 };
 
-function buildBookingEmail({ userName, listing, orderId, ticketCount }) {
+function buildBookingEmail({ userName, listing, orderId, totalEntries }) {
   const html = `
     <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px;">
       <h2 style="color:#1a1a2e;">Your tickets are booked! 🎉</h2>
       <p style="color:#555;line-height:1.6;">Hi ${escapeHtml(userName)},</p>
-      <p style="color:#555;line-height:1.6;">Your tickets for <strong>${escapeHtml(listing.title)}</strong> are confirmed (${ticketCount} ticket${ticketCount === 1 ? "" : "s"}).</p>
+      <p style="color:#555;line-height:1.6;">Your tickets for <strong>${escapeHtml(listing.title)}</strong> are confirmed — admits ${totalEntries} ${totalEntries === 1 ? "person" : "people"}.</p>
       <div style="background:#f8f7ff;border-radius:12px;padding:16px;margin:16px 0;">
         <p style="color:#1a1a2e;font-weight:700;margin:0 0 4px;">${escapeHtml(listing.title)}</p>
         <p style="color:#555;font-size:13px;margin:0;">${escapeHtml(listing.venueName || "")}${listing.city ? `, ${escapeHtml(listing.city)}` : ""}</p>
@@ -58,7 +58,7 @@ async function sendBookingConfirmationEmail(orderId) {
       include: {
         user: { select: { email: true, name: true } },
         listing: { select: { title: true, venueName: true, city: true, eventDate: true } },
-        tickets: { select: { id: true } },
+        tickets: { select: { id: true, entriesAllowed: true } },
       },
     });
 
@@ -66,11 +66,13 @@ async function sendBookingConfirmationEmail(orderId) {
     if (!order || !order.user?.email || !order.tickets || order.tickets.length === 0) return;
     if (!order.listing) return;
 
+    const totalEntries = order.tickets.reduce((sum, t) => sum + (t.entriesAllowed ?? 1), 0);
+
     const { subject, html } = buildBookingEmail({
       userName: order.user.name || "there",
       listing: order.listing,
       orderId: order.id,
-      ticketCount: order.tickets.length,
+      totalEntries,
     });
 
     await sendMail({ to: order.user.email, subject, html });
